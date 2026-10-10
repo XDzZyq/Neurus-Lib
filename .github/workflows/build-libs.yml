@@ -1,0 +1,157 @@
+name: build-libs
+
+# Builds the prebuilt dependency archives (shaderc + stamped qtadvanceddocking)
+# from the pinned `src/` submodules on a two-leg matrix. Pushes to `main` build
+# and publish them as ONE GitHub release tagged `lib-<sha12>` — the tag
+# scripts/fetch_prebuilt.py derives from the built commit. Pull requests run the
+# same build and upload the archives as workflow artifacts, but never publish a
+# release. The build legs upload their archives as artifacts; the release job
+# only downloads those artifacts and publishes them, so the matrix legs never
+# race to create the release.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Both legs take minutes and their logs matter, so one leg failing must
+      # not cancel the other. The release job is skipped unless both succeed.
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            platform: windows
+            script: scripts/build_prebuilt_windows.ps1
+            archive: windows-x64.zip
+          - os: macos-14
+            platform: macos
+            script: scripts/build_prebuilt_macos.sh
+            archive: macos-arm64.tar.gz
+    steps:
+      - name: Checkout (with sources and their dependencies)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install Qt 6.11.1
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: 6.11.1
+          aqtsource: 'git+https://github.com/miurahr/aqtinstall.git'
+          cache: true
+
+      - name: Build prebuilt libraries (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File ${{ matrix.script }}
+
+      - name: Build prebuilt libraries (macOS)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: bash ${{ matrix.script }}
+
+      # The platform directory is the archive root (`windows/…` inside the zip,
+      # `macos/…` inside the tarball), so fetch_prebuilt.py can extract either
+      # archive straight into prebuilt/.
+      - name: Package archive (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: Compress-Archive -Path prebuilt/${{ matrix.platform }} -DestinationPath ${{ matrix.archive }} -Force
+
+      - name: Package archive (macOS)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: tar -czf ${{ matrix.archive }} -C prebuilt ${{ matrix.platform }}
+
+      # The archive feeds the release assets; the ADS stamp feeds the manifest
+      # the release job generates. Both paths sit under the workspace root, so
+      # the artifact carries them at exactly these relative paths.
+      - name: Upload archive + ADS stamp
+        uses: actions/upload-artifact@v4
+        with:
+          name: prebuilt-${{ matrix.platform }}
+          path: |
+            ${{ matrix.archive }}
+            prebuilt/${{ matrix.platform }}/qtadvanceddocking/build_info.txt
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for the built commit and the source SHAs)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Windows build
+        uses: actions/download-artifact@v4
+        with:
+          name: prebuilt-windows
+          path: artifacts/windows
+
+      - name: Download macOS build
+        uses: actions/download-artifact@v4
+        with:
+          name: prebuilt-macos
+          path: artifacts/macos
+
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="lib-$(git rev-parse --short=12 HEAD)"
+          if [[ ! "${tag}" =~ ^lib-[0-9a-f]{12}$ ]]; then
+            echo "::error::unexpected release tag: ${tag}"
+            exit 1
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Assemble release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cp artifacts/windows/windows-x64.zip release/
+          cp artifacts/macos/macos-arm64.tar.gz release/
+          cd release
+          sha256sum windows-x64.zip > windows-x64.zip.sha256
+          sha256sum macos-arm64.tar.gz > macos-arm64.tar.gz.sha256
+
+      - name: Generate manifest.json
+        shell: bash
+        run: |
+          python3 scripts/generate_manifest.py \
+            --artifacts artifacts \
+            --out release/manifest.json \
+            --tag "${{ steps.tag.outputs.tag }}" \
+            --commit "${{ github.sha }}"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ steps.tag.outputs.tag }}
+          body: "Prebuilt shaderc + qtadvanceddocking for Neurus-Lib commit ${{ github.sha }} (Windows x64, macOS arm64)."
+          fail_on_unmatched_files: true
+          files: |
+            release/windows-x64.zip
+            release/windows-x64.zip.sha256
+            release/macos-arm64.tar.gz
+            release/macos-arm64.tar.gz.sha256
+            release/manifest.json

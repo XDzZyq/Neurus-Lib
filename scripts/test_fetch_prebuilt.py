@@ -17,12 +17,15 @@ notice:
   the archive is verified *before* anything is extracted.
 - **Replace, not merge.** `install` clears only the target platform's tree
   before extracting, so a file absent from a newer archive cannot survive in
-  `prebuilt/`, and another platform's tree is never touched.
+  `prebuilt/`, and another platform's tree is never touched. An invalid
+  platform is rejected before any deletion, and an archive without the
+  expected `<platform>/` root is rejected before the stamp makes it sticky.
 - **Idempotence.** A `.version` stamp naming the resolved tag short-circuits
   the download unless `--force` is given.
 
-No network access and no third-party dependencies: only the pure helpers plus
-`install()` / `verify_sha256()` run, against local temp files. The macOS
+No network access and no third-party dependencies: the pure helpers plus
+`install()` / `verify_sha256()` run against local temp files, and `main()`'s
+ordering is pinned with mocked `_download` / `head_sha` lookups. The macOS
 extraction branch is exercised with a locally built `.tar.gz` because that
 leg cannot run on a Windows machine.
 
@@ -182,6 +185,49 @@ class InstallTest(TempDirTestCase):
             data,
         )
 
+    def test_install_rejects_unvalidated_platform(self):
+        # `prebuilt / ""` and `prebuilt / "."` are `prebuilt` itself, and
+        # `prebuilt/windows/..` climbs back out; the guard must fire before
+        # any rmtree, leaving every existing tree and the stamp untouched.
+        root = self.tmp_path / "root"
+        keep = root / "prebuilt" / "macos" / "keep.txt"
+        keep.parent.mkdir(parents=True)
+        keep.write_text("keep", encoding="utf-8")
+        (root / "prebuilt" / "windows").mkdir()
+        stamp = root / "prebuilt" / fp.VERSION_STAMP
+        stamp.write_text("lib-deadbeef\n", encoding="utf-8")
+
+        archive = self.tmp_path / "windows-x64.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("windows/x.txt", b"x")
+
+        for platform in ("", ".", "..", "windows/..", "haiku"):
+            with self.subTest(platform=platform):
+                with self.assertRaises(ValueError):
+                    fp.install(archive, root, platform)
+
+        self.assertTrue(keep.exists(),
+                        "an invalid platform must not wipe other platforms")
+        self.assertTrue((root / "prebuilt" / "windows").is_dir())
+        self.assertTrue(stamp.exists(), "an invalid platform must not "
+                                        "delete the version stamp")
+        self.assertTrue((root / "prebuilt").is_dir())
+
+    def test_install_raises_when_archive_lacks_platform_root(self):
+        root = self.tmp_path / "root"
+        archive = self.tmp_path / "windows-x64.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("oops/x.txt", b"x")  # built from the wrong root
+
+        with self.assertRaises(RuntimeError) as caught:
+            fp.install(archive, root, "windows")
+
+        self.assertIn("windows", str(caught.exception))
+        self.assertFalse(
+            (root / "prebuilt" / "windows").exists(),
+            "a wrong-root archive must not count as an install",
+        )
+
     def test_install_leaves_other_platforms_alone(self):
         root = self.tmp_path / "root"
         other = root / "prebuilt" / "macos" / "keep.txt"
@@ -232,6 +278,73 @@ class ManifestTest(unittest.TestCase):
             {"tag": "lib-f837ed6ff0c2", "built_from_commit": self.SHA},
             self.SHA,
         )  # no raise
+
+
+class MainFlowTest(TempDirTestCase):
+    """Pins main()'s ordering without any network access.
+
+    The downloader and the git/path lookups are mocked to a temp root, so
+    these cases drive the real main() end to end: the archive digest is
+    verified before anything is extracted, the stamp is written only after a
+    successful install, and a missing release exits with a message naming
+    the expected `lib-<sha12>` tag.
+    """
+
+    SHA = "f837ed6ff0c252b4f89ad6d480cdfd5ad25487a1"
+
+    def setUp(self):
+        super().setUp()
+        self.root = self.tmp_path / "root"
+        for name, replacement in (
+            ("repo_root_from", lambda _script: self.root),
+            ("head_sha", lambda _root: self.SHA),
+        ):
+            patcher = mock.patch.object(fp, name, replacement)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def _payload():
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as zf:
+            zf.writestr("windows/x.txt", b"x")
+        return buffer.getvalue()
+
+    def test_main_verifies_before_extracting_and_stamping(self):
+        payload = self._payload()
+        old = self.root / "prebuilt" / "windows" / "old.txt"
+        old.parent.mkdir(parents=True)
+        old.write_text("old", encoding="utf-8")
+
+        def download(url, dest):
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if url.endswith("windows-x64.zip"):
+                dest.write_bytes(payload)
+                return True
+            if url.endswith(".sha256"):
+                dest.write_text("0" * 64, encoding="utf-8")  # wrong digest
+                return True
+            return False
+
+        with mock.patch.object(fp, "_download", side_effect=download):
+            with self.assertRaises(RuntimeError):
+                fp.main(["--platform", "windows"])
+
+        self.assertEqual(old.read_text(encoding="utf-8"), "old",
+                         "a failed verification must not touch the old tree")
+        self.assertFalse(
+            (self.root / "prebuilt" / fp.VERSION_STAMP).exists(),
+            "a failed verification must not write the stamp",
+        )
+        self.assertFalse((self.root / "prebuilt" / ".tmp").exists())
+
+    def test_main_reports_expected_tag_when_release_is_missing(self):
+        with mock.patch.object(fp, "_download", return_value=False):
+            with self.assertRaises(SystemExit) as caught:
+                fp.main(["--platform", "windows"])
+
+        self.assertIn(fp.release_tag_for(self.SHA), str(caught.exception))
+        self.assertFalse((self.root / "prebuilt" / fp.VERSION_STAMP).exists())
 
 
 if __name__ == "__main__":

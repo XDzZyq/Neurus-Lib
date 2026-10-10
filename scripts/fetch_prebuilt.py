@@ -144,6 +144,12 @@ def install(archive_path: Path, root: Path, platform: str) -> None:
     never disturbs another's. The archive carries the `<platform>/` tree at
     its root, so it extracts into `prebuilt/` itself.
     """
+    # `prebuilt / ""` and `prebuilt / "."` are `prebuilt` itself, and paths
+    # like `windows/..` climb out of the platform directory, so an
+    # unvalidated platform would let the rmtree below wipe other platforms'
+    # trees (or the whole prebuilt/). archive_name() is the known-set check.
+    archive_name(platform)
+
     prebuilt = prebuilt_dir(root)
     target = prebuilt / platform
     if target.exists():
@@ -159,6 +165,12 @@ def install(archive_path: Path, root: Path, platform: str) -> None:
                 tf.extractall(prebuilt, filter="data")
             else:  # pragma: no cover - Python < 3.12
                 tf.extractall(prebuilt)
+
+    if not target.is_dir():
+        raise RuntimeError(
+            f"archive {Path(archive_path).name} did not contain the expected "
+            f"'{platform}/' directory; refusing to treat the install as complete"
+        )
 
 
 def head_sha(root: Path) -> str:

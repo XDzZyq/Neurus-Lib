@@ -129,101 +129,24 @@ jobs:
 
       - name: Generate manifest.json
         shell: bash
-        env:
-          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
-          BUILT_FROM_COMMIT: ${{ github.sha }}
         run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json
-          import os
-          import subprocess
-          from pathlib import Path
-
-          artifacts = Path("artifacts")
-          release = Path("release")
-
-          # `git submodule status` prints `[ +-U]<40-hex-sha> <path> (desc)`;
-          # the leading marker is checkout state, not part of the SHA.
-          sources = {}
-          status = subprocess.run(
-              ["git", "submodule", "status"],
-              check=True, capture_output=True, text=True,
-          ).stdout
-          for line in status.splitlines():
-              parts = line.split()
-              if len(parts) >= 2:
-                  sources[parts[1]] = parts[0].lstrip("+-U")
-
-          # The ADS stamp is flat `key=value` text (scripts/ads_standalone);
-          # both platforms are present in one release, so the stamps are keyed
-          # by platform.
-          stamps = {}
-          for platform in ("windows", "macos"):
-              stamp_path = (artifacts / platform / "prebuilt" / platform
-                            / "qtadvanceddocking" / "build_info.txt")
-              if not stamp_path.is_file():
-                  raise SystemExit(f"missing ADS stamp for {platform}: {stamp_path}")
-              stamp = {}
-              for line in stamp_path.read_text(encoding="utf-8").splitlines():
-                  line = line.strip()
-                  if not line or line.startswith("#") or "=" not in line:
-                      continue
-                  key, _, value = line.partition("=")
-                  stamp[key.strip()] = value.strip()
-              missing = [key for key in ("qt_version", "cxx_standard",
-                                         "ads_version", "compiler")
-                         if key not in stamp]
-              if missing:
-                  raise SystemExit(f"{stamp_path}: missing {', '.join(missing)}")
-              stamps[platform] = stamp
-
-          manifest = {
-              "tag": os.environ["RELEASE_TAG"],
-              # The full 40-hex commit SHA: fetch_prebuilt.py validates this
-              # against the checked-out commit exactly, so it must never be
-              # abbreviated.
-              "built_from_commit": os.environ["BUILT_FROM_COMMIT"],
-              "platform": ["windows", "macos"],
-              "sources": sources,
-              "ads_stamp": stamps,
-          }
-          text = json.dumps(manifest, indent=2, sort_keys=True)
-          (release / "manifest.json").write_text(text + "\n", encoding="utf-8")
-          print(text)
-          PY
+          python3 scripts/generate_manifest.py \
+            --artifacts artifacts \
+            --out release/manifest.json \
+            --tag "${{ steps.tag.outputs.tag }}" \
+            --commit "${{ github.sha }}"
 
       - name: Publish GitHub release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          set -euo pipefail
-          cd release
-          assets=(
-            windows-x64.zip
-            windows-x64.zip.sha256
-            macos-arm64.tar.gz
-            macos-arm64.tar.gz.sha256
-            manifest.json
-          )
-          for asset in "${assets[@]}"; do
-            if [[ ! -f "${asset}" ]]; then
-              echo "::error::missing release asset: ${asset}"
-              exit 1
-            fi
-          done
-
-          # `gh release create` has no --clobber flag (only `gh release upload`
-          # does), so a re-run of this workflow for the same commit refreshes
-          # the existing release's assets instead of failing on them.
-          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            gh release upload "${RELEASE_TAG}" --clobber "${assets[@]}"
-          else
-            gh release create "${RELEASE_TAG}" \
-              --target "${GITHUB_SHA}" \
-              --title "${RELEASE_TAG}" \
-              --notes "Prebuilt shaderc + qtadvanceddocking for Neurus-Lib commit ${GITHUB_SHA} (Windows x64, macOS arm64)." \
-              "${assets[@]}"
-          fi
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ steps.tag.outputs.tag }}
+          body: "Prebuilt shaderc + qtadvanceddocking for Neurus-Lib commit ${{ github.sha }} (Windows x64, macOS arm64)."
+          fail_on_unmatched_files: true
+          files: |
+            release/windows-x64.zip
+            release/windows-x64.zip.sha256
+            release/macos-arm64.tar.gz
+            release/macos-arm64.tar.gz.sha256
+            release/manifest.json

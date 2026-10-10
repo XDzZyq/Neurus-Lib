@@ -1,14 +1,18 @@
 name: build-libs
 
 # Builds the prebuilt dependency archives (shaderc + stamped qtadvanceddocking)
-# and publishes them as ONE GitHub release tagged `lib-<sha12>` — the tag
-# scripts/fetch_prebuilt.py derives from the built commit. The build legs run
-# on a matrix and upload their archives as artifacts; the release job only
-# downloads those artifacts and publishes them, so the matrix legs never race
-# to create the release.
+# from the pinned `src/` submodules on a two-leg matrix. Pushes to `main` build
+# and publish them as ONE GitHub release tagged `lib-<sha12>` — the tag
+# scripts/fetch_prebuilt.py derives from the built commit. Pull requests run the
+# same build and upload the archives as workflow artifacts, but never publish a
+# release. The build legs upload their archives as artifacts; the release job
+# only downloads those artifacts and publishes them, so the matrix legs never
+# race to create the release.
 
 on:
   push:
+    branches: [main]
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
@@ -85,6 +89,7 @@ jobs:
   release:
     name: release
     needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (for the built commit and the source SHAs)

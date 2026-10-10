@@ -18,10 +18,11 @@ extracted.
 ## Producing the prebuilt libraries
 
 The producer builds run in CI (`.github/workflows/build-libs.yml`). Every push
-to `main` — and every manual `workflow_dispatch` run — builds shaderc and the
-stamped qtadvanceddocking archives from the pinned `src/` submodules and
-publishes a GitHub release tagged `lib-<sha12>`, where `sha12` is the first 12
-hex digits of the commit built. Each release carries:
+to `main` builds shaderc and the stamped qtadvanceddocking archives from the
+pinned `src/` submodules and publishes a GitHub release tagged `lib-<sha12>`,
+where `sha12` is the first 12 hex digits of the commit built. Pull requests run
+the same build as a check without publishing — the archives are uploaded as
+workflow artifacts only. Each release carries:
 
 - `windows-x64.zip` and `macos-arm64.tar.gz`, each holding its platform
   directory at the archive root (`windows/…`, `macos/…`), so either archive

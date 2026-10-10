@@ -1,0 +1,229 @@
+name: build-libs
+
+# Builds the prebuilt dependency archives (shaderc + stamped qtadvanceddocking)
+# and publishes them as ONE GitHub release tagged `lib-<sha12>` — the tag
+# scripts/fetch_prebuilt.py derives from the built commit. The build legs run
+# on a matrix and upload their archives as artifacts; the release job only
+# downloads those artifacts and publishes them, so the matrix legs never race
+# to create the release.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Both legs take minutes and their logs matter, so one leg failing must
+      # not cancel the other. The release job is skipped unless both succeed.
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            platform: windows
+            script: scripts/build_prebuilt_windows.ps1
+            archive: windows-x64.zip
+          - os: macos-14
+            platform: macos
+            script: scripts/build_prebuilt_macos.sh
+            archive: macos-arm64.tar.gz
+    steps:
+      - name: Checkout (with sources and their dependencies)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install Qt 6.11.1
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: 6.11.1
+          aqtsource: 'git+https://github.com/miurahr/aqtinstall.git'
+          cache: true
+
+      - name: Build prebuilt libraries (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File ${{ matrix.script }}
+
+      - name: Build prebuilt libraries (macOS)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: bash ${{ matrix.script }}
+
+      # The platform directory is the archive root (`windows/…` inside the zip,
+      # `macos/…` inside the tarball), so fetch_prebuilt.py can extract either
+      # archive straight into prebuilt/.
+      - name: Package archive (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: Compress-Archive -Path prebuilt/${{ matrix.platform }} -DestinationPath ${{ matrix.archive }} -Force
+
+      - name: Package archive (macOS)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: tar -czf ${{ matrix.archive }} -C prebuilt ${{ matrix.platform }}
+
+      # The archive feeds the release assets; the ADS stamp feeds the manifest
+      # the release job generates. Both paths sit under the workspace root, so
+      # the artifact carries them at exactly these relative paths.
+      - name: Upload archive + ADS stamp
+        uses: actions/upload-artifact@v4
+        with:
+          name: prebuilt-${{ matrix.platform }}
+          path: |
+            ${{ matrix.archive }}
+            prebuilt/${{ matrix.platform }}/qtadvanceddocking/build_info.txt
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for the built commit and the source SHAs)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Windows build
+        uses: actions/download-artifact@v4
+        with:
+          name: prebuilt-windows
+          path: artifacts/windows
+
+      - name: Download macOS build
+        uses: actions/download-artifact@v4
+        with:
+          name: prebuilt-macos
+          path: artifacts/macos
+
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="lib-$(git rev-parse --short=12 HEAD)"
+          if [[ ! "${tag}" =~ ^lib-[0-9a-f]{12}$ ]]; then
+            echo "::error::unexpected release tag: ${tag}"
+            exit 1
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Assemble release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cp artifacts/windows/windows-x64.zip release/
+          cp artifacts/macos/macos-arm64.tar.gz release/
+          cd release
+          sha256sum windows-x64.zip > windows-x64.zip.sha256
+          sha256sum macos-arm64.tar.gz > macos-arm64.tar.gz.sha256
+
+      - name: Generate manifest.json
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          BUILT_FROM_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          artifacts = Path("artifacts")
+          release = Path("release")
+
+          # `git submodule status` prints `[ +-U]<40-hex-sha> <path> (desc)`;
+          # the leading marker is checkout state, not part of the SHA.
+          sources = {}
+          status = subprocess.run(
+              ["git", "submodule", "status"],
+              check=True, capture_output=True, text=True,
+          ).stdout
+          for line in status.splitlines():
+              parts = line.split()
+              if len(parts) >= 2:
+                  sources[parts[1]] = parts[0].lstrip("+-U")
+
+          # The ADS stamp is flat `key=value` text (scripts/ads_standalone);
+          # both platforms are present in one release, so the stamps are keyed
+          # by platform.
+          stamps = {}
+          for platform in ("windows", "macos"):
+              stamp_path = (artifacts / platform / "prebuilt" / platform
+                            / "qtadvanceddocking" / "build_info.txt")
+              if not stamp_path.is_file():
+                  raise SystemExit(f"missing ADS stamp for {platform}: {stamp_path}")
+              stamp = {}
+              for line in stamp_path.read_text(encoding="utf-8").splitlines():
+                  line = line.strip()
+                  if not line or line.startswith("#") or "=" not in line:
+                      continue
+                  key, _, value = line.partition("=")
+                  stamp[key.strip()] = value.strip()
+              missing = [key for key in ("qt_version", "cxx_standard",
+                                         "ads_version", "compiler")
+                         if key not in stamp]
+              if missing:
+                  raise SystemExit(f"{stamp_path}: missing {', '.join(missing)}")
+              stamps[platform] = stamp
+
+          manifest = {
+              "tag": os.environ["RELEASE_TAG"],
+              # The full 40-hex commit SHA: fetch_prebuilt.py validates this
+              # against the checked-out commit exactly, so it must never be
+              # abbreviated.
+              "built_from_commit": os.environ["BUILT_FROM_COMMIT"],
+              "platform": ["windows", "macos"],
+              "sources": sources,
+              "ads_stamp": stamps,
+          }
+          text = json.dumps(manifest, indent=2, sort_keys=True)
+          (release / "manifest.json").write_text(text + "\n", encoding="utf-8")
+          print(text)
+          PY
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cd release
+          assets=(
+            windows-x64.zip
+            windows-x64.zip.sha256
+            macos-arm64.tar.gz
+            macos-arm64.tar.gz.sha256
+            manifest.json
+          )
+          for asset in "${assets[@]}"; do
+            if [[ ! -f "${asset}" ]]; then
+              echo "::error::missing release asset: ${asset}"
+              exit 1
+            fi
+          done
+
+          # `gh release create` has no --clobber flag (only `gh release upload`
+          # does), so a re-run of this workflow for the same commit refreshes
+          # the existing release's assets instead of failing on them.
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" --clobber "${assets[@]}"
+          else
+            gh release create "${RELEASE_TAG}" \
+              --target "${GITHUB_SHA}" \
+              --title "${RELEASE_TAG}" \
+              --notes "Prebuilt shaderc + qtadvanceddocking for Neurus-Lib commit ${GITHUB_SHA} (Windows x64, macOS arm64)." \
+              "${assets[@]}"
+          fi

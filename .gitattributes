@@ -1,0 +1,3 @@
+# The producer scripts run under bash on macOS/CI; keep them LF so a Windows
+# checkout (core.autocrlf=true) cannot hand bash a CRLF script.
+*.sh text eol=lf

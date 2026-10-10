@@ -201,11 +201,15 @@ if ($AdsOnly) {
     # --- CMake configure (Release, shared) ---
     # libshaderc builds both a static and a shared target unconditionally;
     # shaderc_shared is the one the Neurus build links against.
+    # -A x64 pins the target architecture: the Visual Studio generator would
+    # otherwise default to the host architecture and silently produce the
+    # wrong one.
     Step "shaderc: CMake configure (Release, shared)"
     $ShadercBuild = Join-Path $ProjectRoot 'build\_shaderc_windows'
     $ShadercCmakeArgs = @(
         '-S', (Join-Path $ProjectRoot 'src\shaderc')
         '-B', $ShadercBuild
+        '-A', 'x64'
         '-DSHADERC_SKIP_TESTS=ON'
         '-DSHADERC_ENABLE_EXAMPLES=OFF'
         '-DSHADERC_SKIP_INSTALL=OFF'
@@ -258,10 +262,14 @@ Ok "qtadvanceddocking submodule initialized"
 # directly: the wrapper pins the C++ standard (the submodule hardcodes 17) and
 # writes the build_info.txt stamp that the Neurus build checks before trusting
 # these archives.
+# -A x64 pins the target architecture for the shared Release/Debug configure
+# args: the Visual Studio generator would otherwise default to the host
+# architecture and silently produce the wrong one.
 Step "qtadvanceddocking: CMake configure (Release, C++$NeurusCxxStandard)"
 $AdsReleaseBuild = Join-Path $ProjectRoot 'build\_ads_windows_release'
 $AdsCmakeCommon = @(
     '-S', (Join-Path $ProjectRoot 'scripts\ads_standalone')
+    '-A', 'x64'
     "-DNEURUS_ADS_SOURCE_DIR=$(Join-Path $ProjectRoot 'src\qtadvanceddocking')"
     "-DNEURUS_ADS_CXX_STANDARD=$NeurusCxxStandard"
 )

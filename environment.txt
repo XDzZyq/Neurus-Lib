@@ -1,0 +1,6 @@
+# Python requirements for the Neurus C++ scripting layer (src/script).
+#
+# Installed into lib/.venv by lib/scripts/setup_python_env.* during `make update`.
+# pybind11 is consumed by CMake (find_package(pybind11 CONFIG)) as a header-only
+# build dependency for embedding CPython into Neurus.
+pybind11>=3.0,<4

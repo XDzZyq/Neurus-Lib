@@ -33,7 +33,7 @@ jobs:
             platform: windows
             script: scripts/build_prebuilt_windows.ps1
             archive: windows-x64.zip
-          - os: macos-14
+          - os: macos-latest
             platform: macos
             script: scripts/build_prebuilt_macos.sh
             archive: macos-arm64.tar.gz

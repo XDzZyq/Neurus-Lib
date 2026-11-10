@@ -27,3 +27,15 @@
 	path = src/shaderc
 	url = https://github.com/google/shaderc
 	shallow = true
+[submodule "src/asio"]
+	path = src/asio
+	url = https://github.com/chriskohlhoff/asio.git
+	shallow = true
+[submodule "src/cli11"]
+	path = src/cli11
+	url = https://github.com/CLIUtils/CLI11.git
+	shallow = true
+[submodule "src/json"]
+	path = src/json
+	url = https://github.com/nlohmann/json.git
+	shallow = true

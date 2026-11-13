@@ -31,7 +31,11 @@ import subprocess
 from pathlib import Path
 
 # The platforms a release carries, in manifest order.
-PLATFORMS = ("windows", "macos")
+PLATFORMS = ("windows", "macos", "linux")
+
+# The platforms that ship a qtadvanceddocking archive. Linux is headless: its
+# build has no Qt, so it publishes shaderc only and has no ADS stamp to collect.
+ADS_PLATFORMS = ("windows", "macos")
 
 # The ADS compatibility keys every build_info.txt stamp must carry: the
 # consuming build refuses an archive whose stamp lacks them.
@@ -95,7 +99,7 @@ def collect_ads_stamps(artifacts: Path) -> dict[str, dict[str, str]]:
     cannot trust.
     """
     stamps = {}
-    for platform in PLATFORMS:
+    for platform in ADS_PLATFORMS:
         stamp_path = (Path(artifacts) / platform / "prebuilt" / platform
                       / "qtadvanceddocking" / "build_info.txt")
         if not stamp_path.is_file():

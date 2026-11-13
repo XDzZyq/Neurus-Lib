@@ -37,6 +37,12 @@ jobs:
             platform: macos
             script: scripts/build_prebuilt_macos.sh
             archive: macos-arm64.tar.gz
+          # Ubuntu 22.04 is the oldest image we support, so its glibc is the
+          # floor for the shaderc we ship. Linux is headless: shaderc only.
+          - os: ubuntu-22.04
+            platform: linux
+            script: scripts/build_prebuilt_linux.sh
+            archive: linux-x64.tar.gz
     steps:
       - name: Checkout (with sources and their dependencies)
         uses: actions/checkout@v4
@@ -44,7 +50,9 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      # Qt is only needed by the qtadvanceddocking legs; Linux links no Qt.
       - name: Install Qt 6.11.1
+        if: matrix.platform != 'linux'
         uses: jurplel/install-qt-action@v4
         with:
           version: 6.11.1
@@ -61,6 +69,14 @@ jobs:
         shell: bash
         run: bash ${{ matrix.script }}
 
+      - name: Build prebuilt libraries (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+          bash ${{ matrix.script }}
+
       # The platform directory is the archive root (`windows/…` inside the zip,
       # `macos/…` inside the tarball), so fetch_prebuilt.py can extract either
       # archive straight into prebuilt/.
@@ -74,16 +90,31 @@ jobs:
         shell: bash
         run: tar -czf ${{ matrix.archive }} -C prebuilt ${{ matrix.platform }}
 
+      - name: Package archive (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: tar -czf ${{ matrix.archive }} -C prebuilt ${{ matrix.platform }}
+
       # The archive feeds the release assets; the ADS stamp feeds the manifest
       # the release job generates. Both paths sit under the workspace root, so
       # the artifact carries them at exactly these relative paths.
       - name: Upload archive + ADS stamp
+        if: matrix.platform != 'linux'
         uses: actions/upload-artifact@v4
         with:
           name: prebuilt-${{ matrix.platform }}
           path: |
             ${{ matrix.archive }}
             prebuilt/${{ matrix.platform }}/qtadvanceddocking/build_info.txt
+          if-no-files-found: error
+
+      # Linux ships no ADS archive, so there is no stamp to carry.
+      - name: Upload archive (Linux)
+        if: matrix.platform == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: prebuilt-${{ matrix.platform }}
+          path: ${{ matrix.archive }}
           if-no-files-found: error
 
   release:
@@ -109,6 +140,12 @@ jobs:
           name: prebuilt-macos
           path: artifacts/macos
 
+      - name: Download Linux build
+        uses: actions/download-artifact@v4
+        with:
+          name: prebuilt-linux
+          path: artifacts/linux
+
       - name: Resolve release tag
         id: tag
         shell: bash
@@ -128,9 +165,11 @@ jobs:
           mkdir -p release
           cp artifacts/windows/windows-x64.zip release/
           cp artifacts/macos/macos-arm64.tar.gz release/
+          cp artifacts/linux/linux-x64.tar.gz release/
           cd release
           sha256sum windows-x64.zip > windows-x64.zip.sha256
           sha256sum macos-arm64.tar.gz > macos-arm64.tar.gz.sha256
+          sha256sum linux-x64.tar.gz > linux-x64.tar.gz.sha256
 
       - name: Generate manifest.json
         shell: bash
@@ -147,11 +186,13 @@ jobs:
           tag_name: ${{ steps.tag.outputs.tag }}
           target_commitish: ${{ github.sha }}
           name: ${{ steps.tag.outputs.tag }}
-          body: "Prebuilt shaderc + qtadvanceddocking for Neurus-Lib commit ${{ github.sha }} (Windows x64, macOS arm64)."
+          body: "Prebuilt shaderc + qtadvanceddocking for Neurus-Lib commit ${{ github.sha }} (Windows x64, macOS arm64, Linux x64 headless - shaderc only)."
           fail_on_unmatched_files: true
           files: |
             release/windows-x64.zip
             release/windows-x64.zip.sha256
             release/macos-arm64.tar.gz
             release/macos-arm64.tar.gz.sha256
+            release/linux-x64.tar.gz
+            release/linux-x64.tar.gz.sha256
             release/manifest.json
